@@ -1,260 +1,196 @@
-"""
-SmolLM2-135M Shakespeare Generator
-Hugging Face Gradio App for trained model deployment
-"""
-
-import gradio as gr
+import os
 import torch
 import tiktoken
-from model import SmolLM2Config, SmolLM2ForCausalLM
-import os
+from flask import Flask, request, jsonify, render_template_string
+from model import DeepSeekV3Config, DeepSeekV3ForCausalLM
 
-# ============================================================================
-# MODEL LOADING
-# ============================================================================
+app = Flask(__name__)
 
-print("Loading SmolLM2-135M Shakespeare Model...")
-
-# Device setup
+# -----------------------------------------------------------------------------
+# Model Loading
+# -----------------------------------------------------------------------------
+MODEL_PATH = "checkpoint_5500.pt"  # Ensure this matches your final checkpoint name
+DEVICE = "cpu"
 if torch.cuda.is_available():
-    device = 'cuda'
-    print(f"Using device: CUDA ({torch.cuda.get_device_name(0)})")
+    DEVICE = "cuda"
 elif torch.backends.mps.is_available():
-    device = 'mps'
-    print(f"Using device: MPS (Apple Silicon)")
+    DEVICE = "mps"
+
+print(f"Loading model from {MODEL_PATH} on {DEVICE}...")
+
+# Initialize model structure
+config = DeepSeekV3Config(
+    vocab_size=50257,
+    hidden_size=576,
+    num_hidden_layers=30,
+    num_attention_heads=9,
+    kv_lora_rank=512,
+    moe_intermediate_size=256,
+    n_shared_experts=1,
+    n_routed_experts=8,
+    num_experts_per_tok=2,
+    max_position_embeddings=2048,
+)
+model = DeepSeekV3ForCausalLM(config)
+
+# Load weights if available
+if os.path.exists(MODEL_PATH):
+    checkpoint = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
+    # Handle both full checkpoint dict and state_dict only
+    if "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+    
+    model.load_state_dict(state_dict, strict=False)
+    print("✅ Model weights loaded successfully!")
 else:
-    device = 'cpu'
-    print(f"Using device: CPU")
+    print(f"⚠️ Warning: Checkpoint {MODEL_PATH} not found. Using random weights.")
 
-# Load checkpoint
-checkpoint_path = "checkpoint_5500.pt"
-if not os.path.exists(checkpoint_path):
-    raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-config = checkpoint['config']
-model = SmolLM2ForCausalLM(config)
-model.load_state_dict(checkpoint['model_state_dict'])
-model = model.to(device)
+model.to(DEVICE)
 model.eval()
 
-print(f"✓ Model loaded successfully!")
-print(f"  Parameters: {checkpoint['total_params']:,}")
-print(f"  Training steps: {checkpoint['global_step']:,}")
-
-# Load tokenizer
+# Tokenizer
 tokenizer = tiktoken.get_encoding("gpt2")
 
-# ============================================================================
-# GENERATION FUNCTION
-# ============================================================================
+# -----------------------------------------------------------------------------
+# HTML Template
+# -----------------------------------------------------------------------------
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek-V3 Text Generator</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #f5f5f5; }
+        .container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; text-align: center; }
+        .input-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #34495e; }
+        textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; min-height: 100px; font-size: 16px; }
+        button { background-color: #3498db; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background 0.3s; }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+        #output { margin-top: 20px; padding: 15px; border: 1px solid #e0e0e0; border-radius: 5px; background-color: #f9f9f9; min-height: 50px; white-space: pre-wrap; }
+        .examples { margin-top: 30px; }
+        .example-btn { background-color: #ecf0f1; color: #2c3e50; margin-right: 10px; margin-bottom: 10px; font-size: 14px; padding: 8px 15px; }
+        .example-btn:hover { background-color: #d5dbdb; }
+        .loader { display: none; border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-left: 10px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DeepSeek-V3 Inference</h1>
+        
+        <div class="input-group">
+            <label for="prompt">Enter your prompt:</label>
+            <textarea id="prompt" placeholder="Once upon a time..."></textarea>
+        </div>
+        
+        <div class="input-group">
+            <label>Max Tokens: <span id="token-count">50</span></label>
+            <input type="range" id="max-tokens" min="10" max="200" value="50" oninput="document.getElementById('token-count').innerText = this.value">
+        </div>
 
-def generate_shakespeare(
-    prompt: str,
-    max_tokens: int = 100,
-    temperature: float = 0.8,
-    top_k: int = 50
-) -> str:
-    """
-    Generate Shakespeare-style text from a prompt.
+        <button onclick="generate()" id="gen-btn">Generate Text</button>
+        <div id="loader" class="loader" style="display: none;"></div>
 
-    Args:
-        prompt: Starting text
-        max_tokens: Number of tokens to generate
-        temperature: Sampling temperature (higher = more random)
-        top_k: Top-k filtering (smaller = more focused)
+        <div id="output"></div>
 
-    Returns:
-        Generated text
-    """
-    if not prompt.strip():
-        return "Please enter a prompt!"
+        <div class="examples">
+            <h3>Try Examples:</h3>
+            <button class="example-btn" onclick="setPrompt('The meaning of life is')">Meaning of Life</button>
+            <button class="example-btn" onclick="setPrompt('In a galaxy far far away')">Sci-Fi</button>
+            <button class="example-btn" onclick="setPrompt('Python is a programming language that')">Coding</button>
+        </div>
+    </div>
+
+    <script>
+        function setPrompt(text) {
+            document.getElementById('prompt').value = text;
+        }
+
+        async function generate() {
+            const prompt = document.getElementById('prompt').value;
+            const maxTokens = document.getElementById('max-tokens').value;
+            const btn = document.getElementById('gen-btn');
+            const loader = document.getElementById('loader');
+            const output = document.getElementById('output');
+
+            if (!prompt) return;
+
+            btn.disabled = true;
+            loader.style.display = 'inline-block';
+            output.innerText = 'Generating...';
+
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt, max_new_tokens: parseInt(maxTokens) })
+                });
+                
+                const data = await response.json();
+                if (data.error) {
+                    output.innerText = 'Error: ' + data.error;
+                } else {
+                    output.innerText = data.text;
+                }
+            } catch (e) {
+                output.innerText = 'Error: ' + e.message;
+            } finally {
+                btn.disabled = false;
+                loader.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
+
+@app.route('/')
+def home():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/generate', methods=['POST'])
+def generate():
+    data = request.json
+    prompt = data.get('prompt', '')
+    max_new_tokens = data.get('max_new_tokens', 50)
+    temperature = data.get('temperature', 0.8)
+    top_k = data.get('top_k', 50)
+
+    if not prompt:
+        return jsonify({'error': 'Prompt is required'}), 400
 
     try:
-        # Encode prompt
+        # Encode
         input_ids = tokenizer.encode(prompt)
-        input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(device)
+        input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(DEVICE)
 
         # Generate
         with torch.no_grad():
-            generated = model.generate(
-                input_ids=input_ids,
-                max_new_tokens=max_tokens,
+            output_ids = model.generate(
+                input_ids=input_tensor,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_k=top_k
             )
 
         # Decode
-        generated_text = tokenizer.decode(generated[0].cpu().tolist())
-        return generated_text
+        generated_text = tokenizer.decode(output_ids[0].cpu().tolist())
+        
+        return jsonify({'text': generated_text})
 
     except Exception as e:
-        return f"Error during generation: {str(e)}"
+        return jsonify({'error': str(e)}), 500
 
-# ============================================================================
-# GRADIO INTERFACE
-# ============================================================================
-
-# Example prompts
-examples = [
-    ["To be or not to be", 100, 0.8, 50],
-    ["Once upon a time in fair Verona", 150, 0.7, 40],
-    ["Friends, Romans, countrymen", 120, 0.8, 50],
-    ["Now is the winter of our discontent", 100, 0.9, 60],
-    ["The quality of mercy is not strained", 80, 0.7, 40],
-]
-
-# Custom CSS for better styling
-css = """
-#title {
-    text-align: center;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    font-size: 2.5em;
-    font-weight: bold;
-    margin-bottom: 0.5em;
-}
-#description {
-    text-align: center;
-    font-size: 1.1em;
-    color: #666;
-    margin-bottom: 2em;
-}
-.metrics {
-    background: #f0f0f0;
-    padding: 15px;
-    border-radius: 10px;
-    margin: 10px 0;
-}
-"""
-
-# Create Gradio interface
-with gr.Blocks(css=css, theme=gr.themes.Soft()) as demo:
-    # Header
-    gr.Markdown("<h1 id='title'>🎭 SmolLM2-135M Shakespeare Generator</h1>")
-    gr.Markdown(
-        "<p id='description'>Generate Shakespeare-style text using a custom-trained 135M parameter language model</p>"
-    )
-
-    # Model Info
-    with gr.Accordion("📊 Model Information", open=False):
-        gr.Markdown(f"""
-        ### Training Details
-        - **Architecture**: SmolLM2-135M (LLaMA-style)
-        - **Parameters**: 135,151,488 (135M)
-        - **Training Steps**: 5,500
-        - **Final Loss**: 0.0530
-        - **Perplexity**: 1.054
-        - **Training Time**: ~12.3 hours
-        - **Dataset**: Shakespeare's Complete Works
-
-        ### Architecture Highlights
-        - **Hidden Size**: 576
-        - **Layers**: 30 (Deep & Narrow)
-        - **Attention Heads**: 9
-        - **KV Heads**: 3 (Grouped Query Attention)
-        - **Context Length**: 2,048 tokens
-        - **Vocabulary**: 50,257 tokens (GPT-2 tokenizer)
-
-        ### Training Performance
-        - Loss Reduction: 99.5% (11.28 → 0.053)
-        - Convergence: Excellent (near-perfect memorization)
-        - Notable: Loss spike at step 2,500 but recovered quickly
-        """)
-
-    # Main Interface
-    with gr.Row():
-        # Left column - Inputs
-        with gr.Column(scale=1):
-            prompt_input = gr.Textbox(
-                label="Enter your prompt",
-                placeholder="To be or not to be...",
-                lines=3,
-                value="To be or not to be"
-            )
-
-            with gr.Accordion("⚙️ Generation Settings", open=True):
-                max_tokens_slider = gr.Slider(
-                    minimum=10,
-                    maximum=300,
-                    value=100,
-                    step=10,
-                    label="Max Tokens",
-                    info="Number of tokens to generate"
-                )
-
-                temperature_slider = gr.Slider(
-                    minimum=0.1,
-                    maximum=2.0,
-                    value=0.8,
-                    step=0.1,
-                    label="Temperature",
-                    info="Higher = more random, Lower = more deterministic"
-                )
-
-                top_k_slider = gr.Slider(
-                    minimum=1,
-                    maximum=100,
-                    value=50,
-                    step=1,
-                    label="Top-K",
-                    info="Smaller = more focused, Larger = more diverse"
-                )
-
-            generate_btn = gr.Button("🎭 Generate Shakespeare", variant="primary", size="lg")
-
-            gr.Markdown("### 📝 Try these examples:")
-            gr.Examples(
-                examples=examples,
-                inputs=[prompt_input, max_tokens_slider, temperature_slider, top_k_slider],
-                label="Example Prompts"
-            )
-
-        # Right column - Output
-        with gr.Column(scale=1):
-            output_text = gr.Textbox(
-                label="Generated Text",
-                lines=15,
-                placeholder="Your generated Shakespeare-style text will appear here...",
-                show_copy_button=True
-            )
-
-            gr.Markdown("""
-            ### 💡 Tips for Better Results
-            - **Temperature 0.7-0.8**: More coherent, Shakespeare-like
-            - **Temperature 0.9-1.2**: More creative, experimental
-            - **Top-K 40-50**: Balanced diversity
-            - **Max Tokens 80-150**: Good length for poetry/dialogue
-            """)
-
-    # Connect button to function
-    generate_btn.click(
-        fn=generate_shakespeare,
-        inputs=[prompt_input, max_tokens_slider, temperature_slider, top_k_slider],
-        outputs=output_text
-    )
-
-    # Footer
-    gr.Markdown("""
-    ---
-    ### 🎓 About This Model
-    This model was trained from scratch using PyTorch on Shakespeare's complete works.
-    It demonstrates the SmolLM2-135M architecture with Grouped Query Attention (GQA),
-    RoPE embeddings, and SwiGLU activations.
-
-    **Training Achievement**: 99.5% loss reduction in just 5,500 steps!
-
-    Made with ❤️ using PyTorch | [View on GitHub](#)
-    """)
-
-# ============================================================================
-# LAUNCH
-# ============================================================================
-
-if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False
-    )
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=7860)

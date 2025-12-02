@@ -29,7 +29,7 @@ class DeepSeekV3Config:
     qk_nope_head_dim: int = 64
     
     # MoE params
-    moe_intermediate_size: int = 160
+    moe_intermediate_size: int = 256
     n_shared_experts: int = 1
     n_routed_experts: int = 8
     num_experts_per_tok: int = 2
