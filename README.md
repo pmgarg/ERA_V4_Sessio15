@@ -59,15 +59,18 @@ We trained the model in two phases on the `input-1.txt` dataset.
 | **5000** | **`0.065`** | **Phase 1 Complete** |
 
 ### Phase 2: Refinement
-*Resumed from checkpoint for 500 extra steps.*
+*Resumed from checkpoint for 4500 extra steps (Total 10000).*
 
 | Step | Loss | Status |
 | :--- | :--- | :--- |
-| **5001** | `0.064` | Resumed training |
-| **5250** | `0.058` | Stable fine-tuning |
-| **5500** | **`0.061`** | **Final Converged Model** |
+| **5500** | `0.061` | Resumed training |
+| **6000** | `0.070` | Training continues |
+| **7000** | `0.070` | Stable loss |
+| **8000** | `0.061` | Improving |
+| **9000** | `0.056` | Convergence approaching |
+| **10000** | **`0.057`** | **Final Converged Model** |
 
-> **Note**: The final loss of `~0.06` is achieved with a sparse architecture that is computationally cheaper during inference!
+> **Note**: The final loss of `~0.057` is achieved with a sparse architecture that is computationally cheaper during inference!
 
 ---
 
@@ -96,7 +99,7 @@ Train the model from scratch using the notebook.
 - `app.py`: Flask application for inference.
 - `test.ipynb`: Training pipeline and verification.
 - `requirements.txt`: Project dependencies.
-- `checkpoint_5500.pt`: Trained model weights.
+- `checkpoint_10000.pt`: Trained model weights.
 
 ---
 
